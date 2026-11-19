@@ -10,10 +10,151 @@ fetch('./questions.json').then(r=>{if(!r.ok)throw Error('โหลดข้อ�
 $('studentForm').onsubmit=e=>{e.preventDefault();if(bank.length<50){$('loadError').textContent='ยังโหลดคลังข้อสอบไม่เสร็จ กรุณาลองใหม่';return}student={fullname:$('fullname').value.trim(),nickname:$('nickname').value.trim(),studentId:$('studentId').value.trim()};if(!student.fullname||!student.nickname||!/^[0-9]+$/.test(student.studentId))return;paper=shuffle(bank).slice(0,50).map(q=>({...q,order:shuffle([0,1,2,3])}));index=0;answers={};$('intro').classList.add('hide');$('exam').classList.remove('hide');render()};
 function render(){let q=paper[index];$('qNumber').textContent=`ข้อ ${index+1} จาก 50`;$('answered').textContent=`ตอบแล้ว ${Object.keys(answers).length}/50`;$('bar').style.width=`${Object.keys(answers).length*2}%`;$('question').textContent=q.question;$('options').replaceChildren();q.order.forEach((original,j)=>{let label=document.createElement('label');label.className='option'+(answers[q.id]===original?' selected':'');let radio=document.createElement('input');radio.type='radio';radio.name='answer';radio.checked=answers[q.id]===original;radio.onchange=()=>{answers[q.id]=original;render()};let text=document.createElement('span');text.textContent='กขคง'[j]+'. '+q.options[original];label.append(radio,text);$('options').append(label)});$('prev').disabled=index===0;$('next').textContent=index===49?'ส่งคำตอบ':'ข้อถัดไป'}
 $('prev').onclick=()=>{if(index>0){index--;render()}};$('next').onclick=()=>{if(index<49){index++;render();return}if(Object.keys(answers).length!==50){let missing=paper.findIndex(q=>answers[q.id]===undefined);alert('กรุณาตอบให้ครบ 50 ข้อก่อนส่งคำตอบ');index=missing;render();return}if(!confirm('ยืนยันส่งคำตอบทั้ง 50 ข้อ?'))return;$('exam').classList.add('hide');$('finish').classList.remove('hide');submit()};
-function submit(){if(saving)return;if(!SCRIPT_URL.startsWith('https://script.google.com/')){$('saveText').textContent='ยังไม่ได้ตั้งค่า Google Apps Script กรุณาแจ้งผู้ดูแลระบบ';$('retrySave').classList.remove('hide');return}saving=true;$('retrySave').classList.add('hide');$('saveText').textContent='กำลังตรวจคะแนนและบันทึกผล...';
-                  saveToken = Array.from(
-  crypto.getRandomValues(new Uint8Array(32)),
-  b => b.toString(16).padStart(2, '0')
-).join('');let form=document.createElement('form');form.method='POST';form.action=SCRIPT_URL;form.target='resultSink';const payload={...student,answers:paper.map(q=>({id:q.id,choice:answers[q.id]})),token:saveToken};let field=document.createElement('input');field.name='payload';field.value=JSON.stringify(payload);form.append(field);document.body.append(form);form.submit();form.remove();setTimeout(()=>{if(saving){saving=false;$('saveText').textContent='ยังไม่ได้รับการยืนยันการบันทึก กรุณาลองอีกครั้งหรือแจ้งผู้ดูแล';$('retrySave').classList.remove('hide')}},20000)}
-window.addEventListener('message',event=>{if(!event.origin.endsWith('.googleusercontent.com')&&!event.origin.endsWith('.google.com'))return;let d=event.data;if(!d||d.type!=='ECON408_RESULT'||d.token!==saveToken)return;saving=false;if(d.ok){$('score').textContent=d.score+'/50';$('passText').textContent=d.score>=45?'ผ่านเกณฑ์การสอบ (90%)':'ไม่ผ่านเกณฑ์การสอบ (90%)';$('passText').className=d.score>=45?'success':'error';$('saveText').textContent='บันทึกผลสอบเรียบร้อยแล้ว';$('retrySave').classList.add('hide')}else{$('saveText').textContent='บันทึกไม่สำเร็จ: '+(d.error||'ไม่ทราบสาเหตุ');$('retrySave').classList.remove('hide')}});$('retrySave').onclick=submit;
+
+let pollGeneration = 0;
+
+function submit() {
+  if (saving) return;
+
+  if (!SCRIPT_URL.startsWith('https://script.google.com/')) {
+    $('saveText').textContent = 'ยังไม่ได้ตั้งค่า Google Apps Script';
+    $('retrySave').classList.remove('hide');
+    return;
+  }
+
+  // สร้าง Token เพียงครั้งเดียวต่อการสอบ
+  // หากส่งซ้ำ จะใช้ Token เดิม
+  if (!saveToken) {
+    saveToken = Array.from(
+      crypto.getRandomValues(new Uint8Array(32)),
+      b => b.toString(16).padStart(2, '0')
+    ).join('');
+  }
+
+  saving = true;
+  const generation = ++pollGeneration;
+
+  $('retrySave').classList.add('hide');
+  $('saveText').textContent = 'กำลังตรวจคะแนนและบันทึกผล...';
+
+  const payload = {
+    ...student,
+    answers: paper.map(q => ({
+      id: q.id,
+      choice: answers[q.id]
+    })),
+    token: saveToken
+  };
+
+  // ส่งคำตอบไปยัง Google Apps Script
+  const form = document.createElement('form');
+  form.method = 'POST';
+  form.action = SCRIPT_URL;
+  form.target = 'resultSink';
+  form.style.display = 'none';
+
+  const field = document.createElement('input');
+  field.name = 'payload';
+  field.value = JSON.stringify(payload);
+
+  form.append(field);
+  document.body.append(form);
+  form.submit();
+  form.remove();
+
+  // ตรวจสอบผลสอบผ่าน doGet โดยไม่ต้องรอ iframe
+  checkResult(generation, 0);
+}
+
+function checkResult(generation, attempt) {
+  if (!saving || generation !== pollGeneration) return;
+
+  // ตรวจสอบได้สูงสุดประมาณ 40 วินาที
+  if (attempt >= 20) {
+    saving = false;
+    $('saveText').textContent =
+      'ยังไม่ได้รับการยืนยันผลสอบ กรุณาลองตรวจสอบอีกครั้ง';
+    $('retrySave').classList.remove('hide');
+    return;
+  }
+
+  const callbackName =
+    'econ408Result_' + generation + '_' + attempt;
+
+  const script = document.createElement('script');
+  let completed = false;
+
+  const timeout = setTimeout(() => {
+    finishRequest(false, null);
+  }, 5000);
+
+  function finishRequest(ok, data) {
+    if (completed) return;
+    completed = true;
+
+    clearTimeout(timeout);
+    script.remove();
+    delete window[callbackName];
+
+    if (!saving || generation !== pollGeneration) return;
+
+    if (ok && data && data.status === 'saved') {
+      const score = Number(data.score);
+
+      if (!Number.isInteger(score) || score < 0 || score > 50) {
+        saving = false;
+        $('saveText').textContent = 'ข้อมูลคะแนนไม่ถูกต้อง';
+        $('retrySave').classList.remove('hide');
+        return;
+      }
+
+      saving = false;
+
+      $('score').textContent = score + '/50';
+
+      $('passText').textContent =
+        score >= 45
+          ? 'ผ่านเกณฑ์การสอบ (90%)'
+          : 'ไม่ผ่านเกณฑ์การสอบ (90%)';
+
+      $('passText').className =
+        score >= 45 ? 'success' : 'error';
+
+      $('saveText').textContent =
+        'บันทึกผลสอบเรียบร้อยแล้ว';
+
+      $('retrySave').classList.add('hide');
+      return;
+    }
+
+    if (ok && data && data.status === 'invalid') {
+      saving = false;
+      $('saveText').textContent = 'รหัสตรวจสอบผลสอบไม่ถูกต้อง';
+      $('retrySave').classList.remove('hide');
+      return;
+    }
+
+    setTimeout(() => {
+      checkResult(generation, attempt + 1);
+    }, 2000);
+  }
+
+  window[callbackName] = data => {
+    finishRequest(true, data);
+  };
+
+  script.onerror = () => {
+    finishRequest(false, null);
+  };
+
+  script.src =
+    SCRIPT_URL +
+    '?callback=' + encodeURIComponent(callbackName) +
+    '&token=' + encodeURIComponent(saveToken) +
+    '&t=' + Date.now();
+
+  document.head.append(script);
+}
+
+$('retrySave').onclick = submit;
 </script></body></html>
